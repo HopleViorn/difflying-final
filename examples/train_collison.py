@@ -1,4 +1,5 @@
 import numpy as np
+from flyinglib.simulation.cost import drone_cost
 import warp as wp
 import torch
 import torch.nn as nn
@@ -37,6 +38,16 @@ def train_free_flight(
     # Training loop
     t = trange(epochs, desc='Train', leave=True)
 
+    obstacles = [[0.5,0.5,0.5],
+                 [-0.5,0.5,0.5],
+                 [0.5,-0.5,0.5],
+                 [-0.5,-0.5,0.5],
+                 [0.5,0.5,-0.5],
+                 [-0.5,0.5,-0.5],
+                 [0.5,-0.5,-0.5],
+                 [-0.5,-0.5,-0.5]]
+    obstacles = np.array(obstacles)
+
     for epoch in t:
         # Forward pass
         drone.step = 0
@@ -56,6 +67,7 @@ def train_free_flight(
         loss_pos = 0
         loss_att = 0
         loss_vel = 0
+        loss_collision = 0
 
         pos = q[:, :3] # positions
         att = q[:, 3:] # attitudes
@@ -67,25 +79,14 @@ def train_free_flight(
         for _ in range(sim_steps):
             a = policy(dir, dist, att, qd)
             q, qd = diff_step(q, qd, a, drone)
-
-            pos = q[:, :3] # positions
-            att = q[:, 3:] # attitudes
-            vel = qd[:, 3:] # velovoties
-            rat = qd[:, :3] # rates
-
-            dp = target_pos - pos
-            dist = torch.norm(dp, dim=1, keepdim=True)
-            dir = dp / dist
-
-            # Compute loss
-            loss_att += 1 - torch.mean(att[:, -1])
-            loss_vel += torch.mean(vel**2)
+            loss += drone_cost(q, qd, drone)
+            
+        loss = loss.mean()
         
-        
-        loss_pos += torch.mean(dist)
+        # loss_pos += torch.mean(dist)
 
         # Compute loss
-        loss = 5. * loss_pos + 0.1 * loss_att +  loss_vel*0.01
+        # loss = 5. * loss_pos + 0.1 * loss_att +  loss_vel*0.01
 
         # Backward pass and optimization
         optimizer.zero_grad()
@@ -115,7 +116,46 @@ def train_free_flight(
     policy_path = log_path + "policy.pth"
     torch.save(policy.state_dict(), policy_path)
 
+    # test_render(policy_path, obstacles)
+
     return policy_path
+
+
+def test_render(
+    policy_path: str,
+    obstacles,
+    sim_steps: int = 150,
+    sim_dt: float = 0.02,
+):
+    print("evaluating...")
+    drone = Drone('train', sim_steps=sim_steps, sim_dt=sim_dt, requires_grad=False)
+
+    q = torch.tensor([[0., 0., 0., 0., 0., 0., 1.]])
+    qd = torch.zeros((1, 6))
+
+    target_pos = [0.7, 0.7, 0.7]
+    target_pos_tensor = torch.tensor([target_pos])
+
+    policy = Towards()
+    policy.load_state_dict(torch.load(policy_path))
+    policy.eval()
+
+    for _ in range(sim_steps):
+        pos = q[:, :3] # positions
+        att = q[:, 3:] # attitudes
+
+        dp = target_pos_tensor - pos
+        dist = torch.norm(dp, dim=1, keepdim=True)
+        dir = dp / dist
+
+        a = policy(dir, dist, att, qd)
+        q, qd = diff_step(q, qd, a, drone)
+        drone.render(target_pos, obstacles)
+
+    print(f"Final pose: {q.detach().cpu().numpy()}")
+    print(f"Final speed: {qd.detach().cpu().numpy()}")
+
+    drone.renderer.save()
 
 
 if __name__ == "__main__":

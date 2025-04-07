@@ -120,7 +120,7 @@ class Drone:
         # Initialize the required simulation states.
         self.states = tuple(self.model.state() for _ in range(self.sim_steps + 1))
 
-        self.renderer = wp.sim.render.SimRenderer(self.model, "drone.usd", fps=self.fps)
+        self.renderer = wp.sim.render.SimRenderer(self.model, f"drone_{name}.usd", fps=self.fps)
 
     @property
     def state(self) -> wp.sim.State:
@@ -133,7 +133,7 @@ class Drone:
     def create_environment(self):
         return
 
-    def render(self, target_pos):
+    def render(self, target_pos, obstacles=None):
         self.renderer.begin_frame(self.step * self.sim_dt)
         self.renderer.render(self.state)
 
@@ -145,6 +145,17 @@ class Drone:
             0.05,
             color=(1.0, 0.0, 0.0),
         )
+
+        # Render the obstacles.
+        if obstacles is not None:
+            for i, obs in enumerate(obstacles):
+                self.renderer.render_sphere(
+                    f"obstacle_{i}",
+                    obs,
+                    wp.quat_identity(),
+                    0.05,
+                    color=(0.0, 0.0, 1.0),
+                )
 
         self.renderer.end_frame()
 

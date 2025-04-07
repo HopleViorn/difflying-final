@@ -52,6 +52,5 @@ def test_render(
     drone.renderer.save()
 
 
-
 if __name__ == "__main__":
-    test_render(policy_path="logs/test/20241105-154547/policy.pth")
+    test_render(policy_path="/home/shuyi/difflyingacross/examples/logs/test/20250304-201706/policy.pth")

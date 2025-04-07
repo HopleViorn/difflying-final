@@ -1,6 +1,5 @@
 import warp as wp
 
-
 @wp.struct
 class Propeller:
     body: int
