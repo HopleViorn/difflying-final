@@ -3,3 +3,8 @@ torch
 warp
 tqdm
 datetime
+gym
+rl-games
+pyyaml
+wandb
+tensorboard

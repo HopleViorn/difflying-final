@@ -12,7 +12,7 @@ class Drone:
         name: str,
         batch_size: int = 1,
         sim_steps: int = 100,
-        sim_dt: float = 0.01,
+        sim_dt: float = 0.02,
         size: float = 0.2,
         requires_grad: bool = True,
         decay: float = 1.0,
@@ -119,8 +119,16 @@ class Drone:
 
         # Initialize the required simulation states.
         self.states = tuple(self.model.state() for _ in range(self.sim_steps + 1))
+        print(f"Drone initialized with {len(self.states)} states (sim_steps={self.sim_steps})")
 
         self.renderer = wp.sim.render.SimRenderer(self.model, f"drone_{name}.usd", fps=self.fps)
+
+    def reset(self):
+        """Reset the drone's step counter and states"""
+        # print(f"Resetting drone (current step={self.step})")
+        self.step = 0
+        # Reinitialize states
+        self.states = tuple(self.model.state() for _ in range(self.sim_steps + 1))
 
     @property
     def state(self) -> wp.sim.State:
@@ -128,12 +136,15 @@ class Drone:
 
     @property
     def next_state(self) -> wp.sim.State:
+        if self.step + 1 >= len(self.states):
+            raise IndexError(f"Step {self.step} exceeds max steps {len(self.states)-1}")
         return self.states[self.step + 1]
     
     def create_environment(self):
         return
 
     def render(self, target_pos, obstacles=None):
+        print(f"Rendering at step {self.step}")
         self.renderer.begin_frame(self.step * self.sim_dt)
         self.renderer.render(self.state)
 

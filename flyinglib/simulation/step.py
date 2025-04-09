@@ -12,6 +12,7 @@ class StepLayer(torch.autograd.Function):
         ctx.tape = wp.Tape()
         ctx.body_q = wp.from_torch(body_q, dtype=wp.transform)
         ctx.body_qd = wp.from_torch(body_qd, dtype=wp.spatial_vector)
+
         ctx.action = wp.from_torch(action)
         ctx.discount = drone.discount
 
