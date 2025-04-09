@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 
+from flyinglib.control.quad_lee_controller import QuadLeeController
 from flyinglib.objects.drone import Drone
 from flyinglib.simulation.step import StepLayer
 
@@ -24,15 +25,16 @@ class QuadSimulator:
         print(f"num_envs: {self.num_envs}")
         print(f"device: {self.device}")
         
-        self.positions = torch.zeros((self.num_envs, 3), device=self.device)
-        self.velocities = torch.zeros((self.num_envs, 3), device=self.device)
-        self.angular_velocities = torch.zeros((self.num_envs, 3), device=self.device)
-        self.orientations = torch.zeros((self.num_envs, 4), device=self.device)
-        self.orientations[:, 3] = 1.0  # 设置四元数的 w 分量为 1，表示初始无旋转
+        self.positions = torch.zeros((self.num_envs, 3), device=self.device, requires_grad=True)
+        self.velocities = torch.zeros((self.num_envs, 3), device=self.device, requires_grad=True)
+        self.angular_velocities = torch.zeros((self.num_envs, 3), device=self.device, requires_grad=True)
+
+        # 0,0,0,1
+        self.orientations = torch.tensor([[0., 0., 0., 1.]], device=self.device, requires_grad=True).repeat(self.num_envs, 1)
         
         # 上一步的动作和当前动作
-        self.last_actions = torch.zeros((self.num_envs, 4), device=self.device)
-        self.current_actions = torch.zeros((self.num_envs, 4), device=self.device)
+        self.last_actions = torch.zeros((self.num_envs, 6), device=self.device, requires_grad=True)
+        self.current_actions = torch.zeros((self.num_envs, 6), device=self.device, requires_grad=True)
         
         # 碰撞状态
         self.collision_status = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
@@ -47,16 +49,14 @@ class QuadSimulator:
             sim_steps=self.task_config.sim_steps,
             sim_dt=self.task_config.sim_dt
         )
-        
-        # 初始化控制器配置
-        controller_config = SimpleConfig()
-        controller_config.max_yaw_rate = 3.0  # 最大偏航角速率（弧度/秒）
+
+        self.controller = QuadLeeController(num_envs=self.num_envs, device=self.device, drone=self.drone)
         
         # 设置时间步长
         self.dt = task_config.sim_dt
         
         # 是否使用高级控制接口
-        self.use_high_level_control = False
+        self.use_high_level_control = True
     
     def step(self, actions):
         """执行一步模拟
@@ -72,9 +72,14 @@ class QuadSimulator:
         # 保存当前动作
         self.last_actions = self.current_actions
         self.current_actions = actions
-        
-        # else:
-        low_level_actions = actions
+
+        if self.use_high_level_control:
+            low_level_actions = self.controller.accelerations_to_motor_thrusts(
+                actions[:, :3], actions[:, 3:], self.orientations
+            )
+        else:
+            low_level_actions = actions
+
         
         # 准备输入状态
         q = torch.cat([
@@ -119,9 +124,8 @@ class QuadSimulator:
         # self.positions[env_ids, 1] = torch.rand(len(env_ids), device=self.device) * 0.5 - 0.25
         # self.positions[env_ids, 2] = torch.rand(len(env_ids), device=self.device) * 1
 
-        self.positions[env_ids, 0] = 0.0
-        self.positions[env_ids, 1] = 0.0
-        self.positions[env_ids, 2] = 0.0
+        self.positions[env_ids] = torch.zeros((len(env_ids), 3), device=self.device, requires_grad=True)
+
         
         # 重置速度、角速度和方向
         self.velocities[env_ids] = 0.0
@@ -250,20 +254,3 @@ class QuadSimulator:
             high_level: 是否使用高级控制模式
         """
         self.use_high_level_control = high_level
-        
-# 简单配置类，用于控制器初始化
-class SimpleConfig:
-    """简单配置类，用于控制器初始化"""
-    
-    def __init__(self):
-        self.max_yaw_rate = 3.0
-        # 添加控制增益参数
-        self.K_pos_tensor_max = [2.0, 2.0, 2.0]
-        self.K_pos_tensor_min = [1.0, 1.0, 1.0]
-        self.K_vel_tensor_max = [1.0, 1.0, 1.0]
-        self.K_vel_tensor_min = [0.5, 0.5, 0.5]
-        self.K_rot_tensor_max = [2.0, 2.0, 2.0]
-        self.K_rot_tensor_min = [1.0, 1.0, 1.0]
-        self.K_angvel_tensor_max = [0.2, 0.2, 0.2]
-        self.K_angvel_tensor_min = [0.1, 0.1, 0.1]
-        self.randomize_params = False 

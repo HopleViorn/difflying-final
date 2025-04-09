@@ -112,8 +112,11 @@ class Drone:
 
         # Floating
         self.mass = self.model.body_mass.numpy()[0]
+        # 转动惯量
+        self.inertia = self.model.body_inertia.numpy()[0]
         gravity = np.linalg.norm(self.model.gravity)
         self.max_thrust = props[0].max_thrust
+        self.max_torque = props[0].max_torque
         action = (self.mass * gravity) / (self.num_props * self.max_thrust)
         self.static_action = action * np.ones(self.num_props)
 

@@ -1,6 +1,7 @@
+from flyinglib.control.quad_lee_controller import QuadLeeController
 from flyinglib.rl_training.rl_games.rl_games_inference import MLP
 from flyinglib.objects.drone import Drone
-from flyinglib.simulation.simulator import SimpleConfig
+from flyinglib.simulation.config.navigation_task_config import task_config
 from flyinglib.simulation.step import diff_step
 
 import torch
@@ -56,11 +57,11 @@ def test_render(
     q = torch.tensor([[0., 0., 0., 0., 0., 0., 1.]]).to("cuda:0")
     qd = torch.zeros((1, 6)).to("cuda:0")
 
-    target_pos = [0.95, 0.95, 0.95]
+    target_pos = [0, 0.95, 0]
     target_pos_tensor = torch.tensor([target_pos]).to("cuda:0")
 
     observation_space_dim = 17  # position(3) + velocity(3) + orientation(4) + vector_to_target(3) + distance_to_target(1) + quad_angular_velocities(3)
-    action_space_dim = 4  #force
+    action_space_dim = 6  #force
 
     policy = MLP(
         observation_space_dim,
@@ -68,10 +69,7 @@ def test_render(
         policy_path
     ).to("cuda:0").eval()
 
-    controller_config = SimpleConfig()
-    controller_config.max_yaw_rate = 3.0  # 最大偏航角速率（弧度/秒）
-    
-    # 初始化高级控制器
+    controller = QuadLeeController(num_envs=1, device="cuda:0", drone=drone)
 
     for _ in range(sim_steps):
         pos = q[:, :3] # positions
@@ -79,21 +77,23 @@ def test_render(
 
         dp = target_pos_tensor - pos
         dist = torch.norm(dp, dim=1, keepdim=True)
+        dp = dp / dist
         # 构建观察向量
         obs = torch.cat([
             pos,  # 位置 (3)
-            qd[:, :3],  # 速度 (3)
+            qd[:, 3:],  # 速度 (3)
             att,  # 姿态 (4)
             dp,  # 目标方向向量 (3)
             dist,  # 到目标的距离 (1)
-            qd[:, 3:]  # 四旋翼角速度 (3)
+            qd[:, :3]  # 四旋翼角速度 (3)
         ], dim=1).to("cuda:0")
         
         # 使用策略网络生成动作
         a = policy(obs)
-        a = transform_policy_action(a)
-
+        a = task_config.action_transformation_function(a)
         print("action: ", a)
+
+        a = controller.accelerations_to_motor_thrusts(a[:, :3], a[:, 3:], att)
 
         position = q[:, :3]
         velocity = qd[:, 3:]
@@ -123,4 +123,4 @@ def test_render(
 
 if __name__ == "__main__":
 
-    test_render("/home/shuyi/difflying-final/flyinglib/rl_training/rl_games/runs/flying_navigation_ppo_08-17-17-14/nn/last_flying_navigation_ppo_ep_200_rew_-inf.pth", None)
+    test_render("runs/flying_navigation_ppo_09-19-10-02/nn/last_flying_navigation_ppo_ep_500_rew_-inf.pth", None)

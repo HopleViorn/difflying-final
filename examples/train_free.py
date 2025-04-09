@@ -1,4 +1,5 @@
 import numpy as np
+from flyinglib.control.quad_lee_controller import QuadLeeController
 import warp as wp
 import torch
 import torch.nn as nn
@@ -16,10 +17,43 @@ from flyinglib.modules.policy import *
 DEVICE = "cuda:0"
 torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
+def action_transformation_function(action):
+        #限制动作范围
+        # processed_action = (torch.sigmoid(action) - 0.5)
+        processed_action = action
+        processed_action[:, 0:3] = processed_action[:, 0:3] * 0.5
+        processed_action[:, 3:] = processed_action[:, 3:] * 0.0001
+
+        # print(f"processed_action: {processed_action}")
+
+        # # 限制加速度范围
+        # processed_action[:, 0] = torch.clamp(processed_action[:, 0], -0.1, 0.1)
+        # processed_action[:, 1] = torch.clamp(processed_action[:, 1], -0.1, 0.1)
+        # processed_action[:, 2] = torch.clamp(processed_action[:, 2], -0.1, 0.1)
+        # # 限制角加速度范围
+        # processed_action[:, 3:] = torch.clamp(processed_action[:, 3:], -0.01, 0.01)
+
+        return processed_action
+
+class PolicyNetwork(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(PolicyNetwork, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.ELU(),
+            nn.Linear(256, 128),
+            nn.ELU(),
+            nn.Linear(128, 64),
+            nn.ELU(),
+            nn.Linear(64, output_dim)
+        )
+    
+    def forward(self, x):
+        return self.network(x)
 
 def train_free_flight(
-    epochs: int = 500,
-    batch_size: int = 512 * 4,
+    epochs: int = 600,
+    batch_size: int = 2048,
     sim_steps: int = 150,
     sim_dt: float = 0.02,
 ):  
@@ -29,8 +63,10 @@ def train_free_flight(
 
     drone = Drone('test', batch_size=batch_size, sim_steps=sim_steps, sim_dt=sim_dt)
 
-    policy = Towards()
+    policy = PolicyNetwork(input_dim=17, output_dim=6)
     optimizer = optim.AdamW(policy.parameters(), lr=0.01, weight_decay=0.0001)
+
+    controller = QuadLeeController(num_envs=batch_size, device=DEVICE, drone=drone)
 
     last_loss_value = np.inf
 
@@ -65,7 +101,26 @@ def train_free_flight(
         dir = dp / dist
 
         for _ in range(sim_steps):
-            a = policy(dir, dist, att, qd)
+            pos = q[:, :3] # positions
+            att = q[:, 3:] # attitudes
+            angular_vel = qd[:, :3] # angular velocities
+            vel = qd[:, 3:] # velocities
+            dp = target_pos - pos
+            dist = torch.norm(dp, dim=1, keepdim=True)
+            dir = dp / dist
+            obs = torch.cat([
+                pos, # 3
+                vel, # 3
+                angular_vel, # 3
+                att, # 4
+                dir, # 3
+                dist, # 1
+            ], dim=1).to(DEVICE)
+            
+            a = policy(obs)
+            a = action_transformation_function(a)
+            a = controller.accelerations_to_motor_thrusts(a[:, :3], a[:, 3:], att)
+            
             q, qd = diff_step(q, qd, a, drone)
 
             pos = q[:, :3] # positions
@@ -80,12 +135,10 @@ def train_free_flight(
             # Compute loss
             loss_att += 1 - torch.mean(att[:, -1])
             loss_vel += torch.mean(vel**2)
-        
-        
-        loss_pos += torch.mean(dist)
-
+            # loss_pos += torch.mean(1 - torch.exp(-0.05*dist))
+            loss_pos += torch.mean(dist)
         # Compute loss
-        loss = 5. * loss_pos + 0.1 * loss_att +  loss_vel*0.01
+        loss = 0.01 * loss_pos + 0.1 * loss_att +  loss_vel*0.01 + 5 * torch.mean(dist)
 
         # Backward pass and optimization
         optimizer.zero_grad()
@@ -105,10 +158,7 @@ def train_free_flight(
         writer.add_scalar("Loss/vel", loss_vel_value, epoch)
         writer.add_scalar("Loss/dist", final_dist, epoch)
 
-        t.set_description(f"Loss: {loss_value}")
-        
-        if final_dist < 2e-2:
-            break
+        t.set_description(f"Loss: {loss_value}, Loss/pos: {loss_pos_value}, Loss/att: {loss_att_value}, Loss/vel: {loss_vel_value}, Loss/dist: {final_dist}")
 
     writer.close()
 
@@ -118,6 +168,86 @@ def train_free_flight(
     return policy_path
 
 
+def test_free(
+    policy_path: str,
+    sim_steps: int = 150,
+    sim_dt: float = 0.02,
+):
+    """
+    测试训练好的策略网络并渲染结果
+    
+    Args:
+        policy_path: 策略网络权重的路径
+        sim_steps: 模拟步数
+        sim_dt: 模拟时间步长
+    """
+    # 创建单个无人机实例，不需要梯度计算
+    drone = Drone('test', sim_steps=sim_steps, sim_dt=sim_dt, requires_grad=False)
+    
+    # 初始化位置和姿态
+    q = torch.tensor([[0., 0., 0., 0., 0., 0., 1.]]).to(DEVICE)
+    qd = torch.zeros((1, 6)).to(DEVICE)
+    
+    # 设置目标位置
+    target_pos = [0.7, 0.7, 0.7]
+    target_pos_tensor = torch.tensor([target_pos]).to(DEVICE)
+    
+    # 加载策略网络
+    policy = PolicyNetwork(input_dim=17, output_dim=6)
+    policy.load_state_dict(torch.load(policy_path))
+    policy.eval()
+    
+    # 创建控制器
+    controller = QuadLeeController(num_envs=1, device=DEVICE, drone=drone)
+    
+    # 模拟并渲染每一步
+    for _ in range(sim_steps):
+        pos = q[:, :3]  # 位置
+        att = q[:, 3:]  # 姿态
+        angular_vel = qd[:, :3]  # 角速度
+        vel = qd[:, 3:]  # 速度
+        
+        # 计算到目标的方向和距离
+        dp = target_pos_tensor - pos
+        dist = torch.norm(dp, dim=1, keepdim=True)
+        dir = dp / dist
+        
+        # 构建观察向量
+        obs = torch.cat([
+            pos,  # 位置 (3)
+            vel,  # 速度 (3)
+            angular_vel,  # 角速度 (3)
+            att,  # 姿态 (4)
+            dir,  # 方向 (3)
+            dist,  # 距离 (1)
+        ], dim=1).to(DEVICE)
+        
+        # 使用策略网络生成动作
+        with torch.no_grad():
+            a = policy(obs)
+            a = action_transformation_function(a)
+            a = controller.accelerations_to_motor_thrusts(a[:, :3], a[:, 3:], att)
+        
+        # 模拟一步
+        q, qd = diff_step(q, qd, a, drone)
+        
+        # 渲染当前状态
+        drone.render(target_pos)
+    
+    # 打印最终位置和速度
+    print(f"最终位置: {q[:, :3].detach().cpu().numpy()}")
+    print(f"最终姿态: {q.detach().cpu().numpy()}")
+    print(f"最终速度: {qd.detach().cpu().numpy()}")
+    
+    # 保存渲染结果
+    drone.renderer.save()
+    
+    return q[:, :3].detach().cpu().numpy()
+
+
 if __name__ == "__main__":
     policy_path = train_free_flight()
     print(f"Checkpoint saved at {policy_path}")
+    print("开始测试策略...")
+    final_pos = test_free(policy_path)
+    print(f"测试完成！最终位置: {final_pos}")
