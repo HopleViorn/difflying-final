@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import trange
 import datetime
 
@@ -23,6 +24,8 @@ def action_transformation_function(action):
         processed_action = action
         processed_action[:, 0:3] = processed_action[:, 0:3] * 0.5
         processed_action[:, 3:] = processed_action[:, 3:] * 0.0001
+        # processed_action[:, 0:3] = torch.clamp(processed_action[:, 0:3], -0.5, 0.5)
+        # processed_action[:, 3:] = torch.clamp(processed_action[:, 3:], -0.0005, 0.0005)
 
         # print(f"processed_action: {processed_action}")
 
@@ -52,10 +55,11 @@ class PolicyNetwork(nn.Module):
         return self.network(x)
 
 def train_free_flight(
-    epochs: int = 600,
+    epochs: int = 400,
     batch_size: int = 2048,
     sim_steps: int = 150,
     sim_dt: float = 0.02,
+    initial_lr: float = 1e-2,
 ):  
     date = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     log_path = "logs/test/" + date + "/"
@@ -64,7 +68,11 @@ def train_free_flight(
     drone = Drone('test', batch_size=batch_size, sim_steps=sim_steps, sim_dt=sim_dt)
 
     policy = PolicyNetwork(input_dim=17, output_dim=6)
-    optimizer = optim.AdamW(policy.parameters(), lr=0.01, weight_decay=0.0001)
+    optimizer = optim.AdamW(policy.parameters(), lr=initial_lr, weight_decay=0.0001)
+    
+    # 添加学习率调度器，在验证损失停止改善时降低学习率
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=50,    
+                                 verbose=True, min_lr=1e-5)
 
     controller = QuadLeeController(num_envs=batch_size, device=DEVICE, drone=drone)
 
@@ -92,7 +100,8 @@ def train_free_flight(
         loss_pos = 0
         loss_att = 0
         loss_vel = 0
-
+        loss_vel_down = 0
+        loss_extreme_angle = 0
         pos = q[:, :3] # positions
         att = q[:, 3:] # attitudes
 
@@ -135,10 +144,13 @@ def train_free_flight(
             # Compute loss
             loss_att += 1 - torch.mean(att[:, -1])
             loss_vel += torch.mean(vel**2)
+            loss_vel_down += torch.mean(torch.relu(-vel - 1.4) ** 2)
+            loss_extreme_angle += torch.mean(torch.relu(-att[:, 3] + 0.9))
+
             # loss_pos += torch.mean(1 - torch.exp(-0.05*dist))
             loss_pos += torch.mean(dist)
         # Compute loss
-        loss = 0.01 * loss_pos + 0.1 * loss_att +  loss_vel*0.01 + 5 * torch.mean(dist)
+        loss = 0.1 * loss_pos + 0.01 * loss_att +  loss_vel*0.001 + 5 * torch.mean(dist) + loss_vel_down * 200 + loss_extreme_angle * 200
 
         # Backward pass and optimization
         optimizer.zero_grad()
@@ -150,6 +162,8 @@ def train_free_flight(
         loss_pos_value = loss_pos.detach().cpu().numpy().item()
         loss_att_value = loss_att.detach().cpu().numpy().item()
         loss_vel_value = loss_vel.detach().cpu().numpy().item()
+        loss_vel_down_value = loss_vel_down.detach().cpu().numpy().item()
+        loss_extreme_angle_value = loss_extreme_angle.detach().cpu().numpy().item()
         final_dist = torch.mean(dist).detach().cpu().numpy().item()
 
         writer.add_scalar("Loss/total", loss_value, epoch)
@@ -157,8 +171,15 @@ def train_free_flight(
         writer.add_scalar("Loss/att", loss_att_value, epoch)
         writer.add_scalar("Loss/vel", loss_vel_value, epoch)
         writer.add_scalar("Loss/dist", final_dist, epoch)
+        
+        # 更新学习率调度器
+        scheduler.step(loss_value)
+        
+        # 记录当前学习率
+        current_lr = optimizer.param_groups[0]['lr']
+        writer.add_scalar("Training/learning_rate", current_lr, epoch)
 
-        t.set_description(f"Loss: {loss_value}, Loss/pos: {loss_pos_value}, Loss/att: {loss_att_value}, Loss/vel: {loss_vel_value}, Loss/dist: {final_dist}")
+        t.set_description(f"Loss: {loss_value:.4f}, Loss/pos: {loss_pos_value:.4f}, Loss/att: {loss_att_value:.4f}, Loss/vel: {loss_vel_value:.4f}, Loss/vel_down: {loss_vel_down_value:.4f},Loss/extreme_angle: {loss_extreme_angle_value:.4f}, final dist: {final_dist:.4f}, LR: {current_lr:.6f}")
 
     writer.close()
 

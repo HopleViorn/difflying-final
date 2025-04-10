@@ -140,7 +140,7 @@ class QuadLeeController:
         motor_thrusts = torch.matmul(self.inv_allocation_matrix, wrench_reshaped)
         motor_thrusts = motor_thrusts.squeeze(-1)
         
-        motor_thrusts = torch.clamp(motor_thrusts, min=0.0)
+        motor_thrusts = torch.clamp(motor_thrusts, min=0.0, max=self.max_thrust)
         normalized_thrusts = motor_thrusts / self.max_thrust
         # print("normalized_thrusts: ", normalized_thrusts)
         
