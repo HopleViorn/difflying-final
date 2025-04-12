@@ -147,7 +147,7 @@ class Drone:
         return
 
     def render(self, target_pos, obstacles=None):
-        print(f"Rendering at step {self.step}")
+        # print(f"Rendering at step {self.step}")
         self.renderer.begin_frame(self.step * self.sim_dt)
         self.renderer.render(self.state)
 
@@ -162,14 +162,25 @@ class Drone:
 
         # Render the obstacles.
         if obstacles is not None:
-            for i, obs in enumerate(obstacles):
-                self.renderer.render_sphere(
-                    f"obstacle_{i}",
-                    obs,
-                    wp.quat_identity(),
-                    0.05,
-                    color=(0.0, 0.0, 1.0),
-                )
+            for i, obstacle in enumerate(obstacles):
+                pos = obstacle["position"]
+                radius = obstacle["radius"]
+                if obstacle["type"] == "box":
+                    self.renderer.render_box(
+                        f"obstacle_{i}",
+                        pos,
+                        wp.quat_identity(),
+                        (radius*2, radius*2, radius*2),  # Convert radius to box size
+                        color=(0.0, 0.0, 1.0),
+                    )
+                else:  # sphere
+                    self.renderer.render_sphere(
+                        f"obstacle_{i}",
+                        pos,
+                        wp.quat_identity(),
+                        radius,
+                        color=(0.0, 0.0, 1.0),
+                    )
 
         self.renderer.end_frame()
 
