@@ -30,6 +30,7 @@ class SceneManager:
         self.mesh_ids = None  # Combined mesh IDs array
         self.depth_image = None
         self.objects = []  # List of objects in scene: [{"position": vec3, "radius": float}]
+        self.target_pos = None
 
     def create_box_mesh(self, size=1.0, flip_normals=False):
         """Create a box mesh with given size
@@ -113,8 +114,38 @@ class SceneManager:
             velocities=wp.zeros(len(vertices), dtype=wp.vec3)
         )
         return mesh
+    
+    def generate_target_pos(self):
+        """Generate a target position for the scene
+        
+        Args:
+            num_targets: Number of target positions to generate
+        """
+        x = torch.rand((self.batch_size, 1), device='cuda:0') * 0.1 + 0.2
+        y = torch.rand((self.batch_size, 1), device='cuda:0') * 0.2 + 0.4
+        z = torch.rand((self.batch_size, 1), device='cuda:0') * 0.5 + 1.3
 
-    def setup_room(self, room_size=5.0, num_objects=5):
+        target_pos = torch.cat([x, y, z], dim=1)
+        self.target_pos = target_pos
+
+    def wall_pos(self):
+        x = np.random.uniform(-0.1, 0.1)
+        y = np.random.uniform(-2, 2)
+        z = np.random.uniform(-0.2, 0.2) + 0.7
+
+        pos = np.array([x, y, z])
+
+    def random_pos(self):
+        x = np.random.uniform(-self.room_size*0.3, self.room_size*0.3)
+        y = np.random.uniform(-self.room_size*0.2, self.room_size*0.2)
+        z = np.random.uniform(1, self.room_size)
+
+        pos = np.array([x, y, z])
+        return pos
+
+    
+    def setup_room(self, room_size = 10.0, num_objects=2):
+        self.room_size = room_size
         """Setup a room with random obstacles
         
         Args:
@@ -144,50 +175,17 @@ class SceneManager:
         # Add random objects
         for i in range(num_objects):
             if np.random.rand() > 0.5:
-                size = np.random.uniform(0.1, 0.2)
+                size = np.random.uniform(0.3, 0.6)
                 obj = self.create_box_mesh(size=size, flip_normals=True)
                 radius = size * 0.5  # Approximate box with sphere
                 obj_type = "box"
             else:
-                radius = np.random.uniform(0.1, 0.2)
+                radius = np.random.uniform(0.3, 0.6)
                 obj = self.create_sphere_mesh(radius=radius, flip_normals=True)
                 obj_type = "sphere"
-            # Random position (avoid center)
-            # pos = np.random.uniform(0.5, 1.2, size=3)
 
-            # # 在球面上均匀采样点
-            # # 使用高斯分布生成三维向量
-            # pos = np.random.normal(0, 1, size=3)
-            # # 归一化到单位球面
-            # pos = pos / np.linalg.norm(pos)
-            
-            # # 缩放到所需距离(在0.5到room_size-0.5之间)
-            # distance = np.random.uniform(0.6, 0.7)
-            # pos = pos * distance + 1.2
+            pos = self.random_pos()
 
-            #分布在距离原点一定距离以外的空间
-            # 生成随机角度
-            # theta = np.random.uniform(0, 2 * np.pi)
-            # phi = np.random.uniform(0, np.pi)
-            
-            # # 将球坐标转换为笛卡尔坐标
-            # x = np.sin(phi) * np.cos(theta)
-            # y = np.sin(phi) * np.sin(theta)
-            # z = np.cos(phi)
-            # pos = np.array([x, y, z])
-
-            # pos = np.random.normal(0, 1, size=3)
-            
-            # # 归一化并缩放到所需距离
-            # pos = pos / np.linalg.norm(pos)
-            # distance = np.random.uniform(0.6, 1)  # 控制障碍物距离原点的范围
-            # pos = pos * distance
-
-            x = np.random.uniform(-0.1, 0.1)
-            y = np.random.uniform(-2, 2)
-            z = np.random.uniform(-0.2, 0.2) + 0.7
-
-            pos = np.array([x, y, z])
 
             obj_points = obj.points.numpy() + pos
             obj_indices = obj.indices.numpy() + vertex_count
@@ -205,7 +203,6 @@ class SceneManager:
             all_velocities.extend(obj_velocities)
             vertex_count += len(obj_points)
             
-            # print(f"Object {i} position: {pos}, vertices: {len(obj_points)}, faces: {len(obj_indices)//3}")
 
         # Create single combined mesh
         combined_mesh = wp.Mesh(
@@ -214,7 +211,6 @@ class SceneManager:
             velocities=wp.array(all_velocities, dtype=wp.vec3)
         )
         self.add_mesh(combined_mesh)
-        # print(f"Created combined mesh with {len(all_points)} vertices and {len(all_indices)//3} faces")
         
     def add_mesh(self, mesh: wp.Mesh) -> None:
         """Add a mesh to the scene

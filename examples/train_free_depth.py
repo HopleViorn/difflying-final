@@ -117,6 +117,37 @@ class PolicyNetwork(nn.Module):
             x = torch.cat([x, torch.zeros(x.shape[0], 64, device=x.device)], dim=1)
         return self.network(x)
 
+class GRUPolicyNetwork(nn.Module):
+    def __init__(self, input_dim, output_dim, hidden_size=128):
+        super(GRUPolicyNetwork, self).__init__()
+        
+        self.image_encoder = CNNImageEncoder(image_res=img_size, latent_dims=64)
+        self.input_dim = input_dim + 64
+        self.hidden_size = hidden_size
+
+        # GRU for temporal feature extraction
+        self.gru = nn.GRU(input_size=self.input_dim, hidden_size=hidden_size, batch_first=True)
+
+        # Fully connected head to output action
+        self.fc = nn.Sequential(
+            nn.Linear(hidden_size, 128),
+            nn.ELU(),
+            nn.Linear(128, output_dim)
+        )
+
+    def forward(self, obs, depth_imgs, hidden_state=None):
+        # depth_imgs: [B, 1, H, W]
+        # obs: [B, D]
+
+        depth_feat = self.image_encoder(depth_imgs)  # [B, 64]
+        x = torch.cat([obs, depth_feat], dim=-1).unsqueeze(1)  # [B, 1, D+64]
+
+        # Pass through GRU
+        output, next_hidden = self.gru(x, hidden_state)  # output: [B, 1, H]
+        action = self.fc(output.squeeze(1))  # [B, output_dim]
+        return action, next_hidden
+
+
 def train_free_flight(
     epochs: int = 100,
     batch_size: int = 128,
@@ -144,17 +175,17 @@ def train_free_flight(
     }
     drone = Drone('test', batch_size=batch_size, sim_steps=sim_steps, sim_dt=sim_dt)
 
-    policy = PolicyNetwork(input_dim=14, output_dim=6)
+    policy = GRUPolicyNetwork(input_dim=14, output_dim=6, hidden_size=128)
 
-    load_policy = "logs/test/20250412-022029/policy_final.pth"
-    # load_policy = None
+    # load_policy = "logs/test/20250412-022029/policy_final.pth"
+    load_policy = None
 
     if load_policy:
         policy.load_state_dict(torch.load(load_policy))
         print(f"加载策略：{load_policy}")
 
 
-    optimizer = optim.AdamW(policy.parameters(), lr=initial_lr, weight_decay=0.0001)
+    optimizer = optim.AdamW(policy.parameters(), lr=initial_lr, weight_decay=0.01)
 
     # 添加学习率调度器，在验证损失停止改善时降低学习率
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=50,    
@@ -188,9 +219,9 @@ def train_free_flight(
         # random_distances = torch.rand((batch_size, 1), device=DEVICE) * 1.2
         # target_pos = random_directions * random_distances  # 最终目标位置
 
-        x = torch.rand((batch_size, 1), device=DEVICE) * 0.5 + 0.1
-        y = torch.rand((batch_size, 1), device=DEVICE) * 0.5 + 0.5
-        z = torch.rand((batch_size, 1), device=DEVICE) * 0.5 + 0.5
+        x = torch.rand((batch_size, 1), device=DEVICE) * 0.1 + 0.2
+        y = torch.rand((batch_size, 1), device=DEVICE) * 0.2 + 0.4
+        z = torch.rand((batch_size, 1), device=DEVICE) * 0.5 + 1.3
 
         target_pos = torch.cat([x, y, z], dim=1)
         # print(f"target_pos: {target_pos}")
@@ -209,6 +240,8 @@ def train_free_flight(
         dp = target_pos - pos
         dist = torch.norm(dp, dim=1, keepdim=True)
         dir = dp / dist
+
+        hidden_state = None
 
         for _ in range(sim_steps):
             # 更新所有环境的摄像机位置和朝向
@@ -249,7 +282,7 @@ def train_free_flight(
                 # nearest_dist, # 1
             ], dim=1).to(DEVICE)
 
-            a = policy(obs, depth_imgs)
+            a, hidden_state = policy(obs, depth_imgs, hidden_state)
             a = action_transformation_function(a)
             a = controller.accelerations_to_motor_thrusts(a[:, :3], a[:, 3:], att)
             
@@ -316,109 +349,6 @@ def train_free_flight(
     torch.save(policy.state_dict(), policy_path)
 
     return policy_path
-
-
-def test_free(
-    policy_path: str,
-    sim_steps: int = 200,
-    sim_dt: float = 0.02,
-):
-    """
-    测试训练好的策略网络并渲染结果
-    
-    Args:
-        policy_path: 策略网络权重的路径
-        sim_steps: 模拟步数
-        sim_dt: 模拟时间步长
-    """
-
-    camera_config = {
-        'width': img_size[0],
-        'height': img_size[1],
-        'horizontal_fov_deg': 120,
-        'max_range': 20.0,
-        'calculate_depth': True,
-        'num_sensors': 1,
-        'segmentation_camera': False,
-        'return_pointcloud': False
-    }
-
-    # 初始化环境管理器并设置场景
-    
-    # 创建单个无人机实例，不需要梯度计算
-    drone = Drone('test', batch_size=1, sim_steps=sim_steps, sim_dt=sim_dt, requires_grad=False)
-    
-    # 初始化位置和姿态
-    q = torch.tensor([[0., 0., 0., 0., 0., 0., 1.]]).to(DEVICE)
-    qd = torch.zeros((1, 6)).to(DEVICE)
-    
-    # 设置目标位置
-    target_pos = [0.2, 0.7, 0.8]
-    target_pos_tensor = torch.tensor([target_pos]).to(DEVICE)
-
-    env_manager = SceneManager(batch_size=1)
-    env_manager.setup_room(room_size=5.0, num_objects=0)
-    env_manager.add_camera('front', config=camera_config, positions=q[:, :3], orientations=q[:, 3:])
-    env_manager.set_camera_pose_tensor('front', q[:, :3], q[:, 3:])
-    env_manager.capture_depth('front')
-    
-    # 加载策略网络
-    policy = PolicyNetwork(input_dim=14, output_dim=6)
-    policy.load_state_dict(torch.load(policy_path))
-    policy.eval()
-    
-    # 创建控制器
-    controller = QuadLeeController(num_envs=1, device=DEVICE, drone=drone)
-    
-    # 模拟并渲染每一步
-    for _ in range(sim_steps):
-        pos = q[:, :3]  # 位置
-        att = q[:, 3:]  # 姿态
-        angular_vel = qd[:, :3]  # 角速度
-        vel = qd[:, 3:]  # 速度
-        
-        # 计算到目标的方向和距离
-        dp = target_pos_tensor - pos
-        dist = torch.norm(dp, dim=1, keepdim=True)
-        dir = dp / dist
-
-        depth_imgs = env_manager.capture_depth('front')
-        depth_imgs = depth_imgs.squeeze(0)
-        # 获取最近物体距离
-        nearest_vec, nearest_dist = env_manager.get_nearest_object_distance(pos)
-        
-        # 构建观察向量
-        obs = torch.cat([
-            vel,  # 速度 (3)
-            angular_vel,  # 角速度 (3)
-            att,  # 姿态 (4)
-            dir,  # 方向 (3)
-            dist,  # 距离 (1)
-            # pos,  # 位置 (3)
-            # nearest_vec,  # 最近物体方向 (3)
-            # nearest_dist,  # 最近物体距离 (1)
-        ], dim=1).to(DEVICE)
-        
-        # 使用策略网络生成动作
-        a = policy(obs, depth_imgs)
-        a = action_transformation_function(a)
-        a = controller.accelerations_to_motor_thrusts(a[:, :3], a[:, 3:], att)
-        
-        # 模拟一步
-        q, qd = diff_step(q, qd, a, drone)
-        
-        # 渲染当前状态
-        drone.render(target_pos)
-    
-    # 打印最终位置和速度
-    print(f"最终位置: {q[:, :3].detach().cpu().numpy()}")
-    print(f"最终姿态: {q.detach().cpu().numpy()}")
-    print(f"最终速度: {qd.detach().cpu().numpy()}")
-    
-    # 保存渲染结果
-    drone.renderer.save()
-    
-    return q[:, :3].detach().cpu().numpy()
 
 
 if __name__ == "__main__":

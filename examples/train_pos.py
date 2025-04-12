@@ -112,11 +112,11 @@ class PolicyNetwork(nn.Module):
         return self.network(x)
 
 def train_free_flight(
-    epochs: int = 100,
+    epochs: int = 300,
     batch_size: int = 2048,
     sim_steps: int = 200,
     sim_dt: float = 0.04,
-    initial_lr: float = 1e-3,
+    initial_lr: float = 1e-2,
 ):  
     date = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     log_path = "logs/test/" + date + "/"
@@ -140,7 +140,7 @@ def train_free_flight(
 
     policy = PolicyNetwork(input_dim=21, output_dim=6)
 
-    # load_policy = "logs/test/20250412-103140/policy_final.pth"
+    # load_policy = "logs/test/20250412-110926/policy_final.pth"
     load_policy = None
 
     if load_policy:
@@ -184,7 +184,7 @@ def train_free_flight(
 
         x = torch.rand((batch_size, 1), device=DEVICE) * 0.1 + 0.2
         y = torch.rand((batch_size, 1), device=DEVICE) * 0.2 + 0.4
-        z = torch.rand((batch_size, 1), device=DEVICE) * 0.5 + 0.7
+        z = torch.rand((batch_size, 1), device=DEVICE) * 0.5 + 1.3
 
         target_pos = torch.cat([x, y, z], dim=1)
         # print(f"target_pos: {target_pos}")
@@ -263,7 +263,7 @@ def train_free_flight(
             loss_vel_down += torch.mean(torch.relu(-vel - 1.0) ** 2)
             loss_extreme_angle += torch.mean(torch.relu(-att[:, 3] + 0.94))
             # loss_nearest_dist += torch.mean(torch.relu(nearest_dist - 0.1) ** 2)
-            loss_nearest_dist += torch.mean(torch.relu(-nearest_dist + 0.3) ** 2) * 1
+            loss_nearest_dist += torch.mean(torch.relu(-nearest_dist + 0.3))
 
             # loss_pos += torch.mean(1 - torch.exp(-0.05*dist))
             loss_pos += torch.mean(dist)
@@ -272,7 +272,7 @@ def train_free_flight(
             policy_path = log_path + f"policy_{epoch}_{dist.mean().item():.4f}.pth"
             torch.save(policy.state_dict(), policy_path)
         # Compute loss
-        loss = 1 * loss_pos + 50 * loss_nearest_dist + 0.005 * loss_att +  loss_vel * 0.001 + 30 * torch.mean(dist) + loss_vel_down * 200 + loss_extreme_angle * 20
+        loss = 1 * loss_pos + 50 * loss_nearest_dist + 0.005 * loss_att +  loss_vel * 0.001 + 60 * torch.mean(dist) + loss_vel_down * 200 + loss_extreme_angle * 200
 
         # Backward pass and optimization
         optimizer.zero_grad()
