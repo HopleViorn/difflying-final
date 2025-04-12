@@ -15,9 +15,7 @@ from flyinglib.simulation.step import *
 from flyinglib.scene.scene_manager import SceneManager
 import cv2
 
-from policy_nn import GRUPolicyNetwork
-from policy_nn import img_size
-
+img_size = (64, 64)
 
 DEVICE = "cuda:0"
 torch.set_default_tensor_type('torch.cuda.FloatTensor')
@@ -29,11 +27,86 @@ def action_transformation_function(action):
     processed_action[:, 3:] = processed_action[:, 3:] * 0.0001
     return processed_action
 
+class CNNImageEncoder(nn.Module):
+    def __init__(self, image_res=(128, 128), latent_dims=64):
+        super(CNNImageEncoder, self).__init__()
+        self.image_res = image_res
+        self.latent_dims = latent_dims
+        
+        # Feature extraction with stride convolutions
+        self.features = nn.Sequential(
+            # Block 1: [1, 135, 240] -> [32, 68, 120]
+            nn.Conv2d(1, 32, kernel_size=5, stride=2, padding=2),
+            nn.ELU(),
+            
+            # Block 2: [32, 68, 120] -> [64, 34, 60]
+            nn.Conv2d(32, 64, kernel_size=5, stride=2, padding=2),
+            nn.ELU(),
+            
+            # Block 3: [64, 34, 60] -> [128, 17, 30]
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.ELU(),
+            
+            # Block 4: [128, 17, 30] -> [256, 9, 15]
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+            nn.ELU()
+        )
+        
+        # Final projection to latent dims
+        self.projection = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),  # [256, 1, 1]
+            nn.Conv2d(256, latent_dims, kernel_size=1),  # [64, 1, 1]
+            nn.Flatten()  # [64]
+        )
+
+        # 添加sigmoid层
+        self.sigmoid = nn.Sigmoid()
+    
+    def forward(self, x):
+        # Reshape input if needed
+        if len(x.shape) == 3:  # [batch, H, W]
+            x = x.unsqueeze(1)  # [batch, 1, H, W]
+        
+        # Forward pass
+        features = self.features(x)
+        latent = self.projection(features)
+        return self.sigmoid(latent)
+    
+
+class PolicyNetwork(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(PolicyNetwork, self).__init__()
+        
+        self.image_encoder = CNNImageEncoder(image_res=img_size, latent_dims=64)
+        
+        # Original network with expanded input dimension (21 + 64 = 85)
+        self.network = nn.Sequential(
+            nn.Linear(input_dim + 64, 512),
+            nn.ELU(),
+            nn.Linear(512, 256),
+            nn.ELU(),
+            nn.Linear(256, 256),
+            nn.ELU(),
+            nn.Linear(256, 128),
+            nn.ELU(),
+            nn.Linear(128, 64),
+            nn.ELU(),
+            nn.Linear(64, output_dim)
+        )
+    
+    def forward(self, x, depth_imgs=None):
+        if depth_imgs is not None:
+            # Encode depth images using VAE
+            depth_latent = self.image_encoder(depth_imgs)
+            x = torch.cat([x, depth_latent], dim=1)
+        else:
+            x = torch.cat([x, torch.zeros(x.shape[0], 64, device=x.device)], dim=1)
+        return self.network(x)
 
 def test_free(
     policy_path: str,
-    sim_steps: int = 200,
-    sim_dt: float = 0.04,
+    sim_steps: int = 150,
+    sim_dt: float = 0.02,
     target_pos = None
 ):
     """
@@ -43,25 +116,24 @@ def test_free(
         policy_path: 策略网络权重的路径
         sim_steps: 模拟步数
         sim_dt: 模拟时间步长
-        target_pos: 目标位置（仅用于可视化）
+        target_pos: 目标位置，如果为None则使用默认值[0.7, 0.7, 0.7]
     """
     print(f"加载策略：{policy_path}")
     
-    # 创建单个无人机实例
-    drone = Drone('test', batch_size=1, sim_steps=sim_steps*3, sim_dt=sim_dt)
+    # 创建单个无人机实例，不需要梯度计算
+    drone = Drone('test', sim_steps=sim_steps*2, sim_dt=sim_dt, requires_grad=False)
     
     # 初始化位置和姿态
-    q = torch.tensor([[0., 0., 0., 0., 0., 0., 1.]], device=DEVICE)
-    qd = torch.zeros((1, 6), device=DEVICE)
+    q = torch.tensor([[0., 0., 0., 0., 0., 0., 1.]]).to(DEVICE)
+    qd = torch.zeros((1, 6)).to(DEVICE)
     
-    # 设置目标位置（仅用于可视化）
-    if target_pos is None:
-        target_pos = [2, 1.5, 0]
-    target_pos_tensor = torch.tensor([target_pos], device=DEVICE)
+    # 设置目标位置
+    target_pos_tensor = torch.tensor([target_pos]).to(DEVICE)
     
-    # 加载GRU策略网络
-    policy = GRUPolicyNetwork(input_dim=10, output_dim=6, hidden_size=128)
+    # 加载策略网络
+    policy = PolicyNetwork(input_dim=17, output_dim=6)
     policy.load_state_dict(torch.load(policy_path))
+    print(f'load policy from {policy_path}')
     policy.eval()
     
     # 创建控制器
@@ -69,12 +141,12 @@ def test_free(
     
     # 初始化环境管理器并设置场景
     env_manager = SceneManager(batch_size=1)
-    env_manager.setup_room()
+    env_manager.setup_room(room_size=5.0, num_objects=16)
     
-    # 添加前置摄像头（使用训练时的图像尺寸）
+    # 添加前置摄像头
     camera_config = {
-        'width': img_size[0],
-        'height': img_size[1],
+        'width': 128,
+        'height': 128,
         'horizontal_fov_deg': 120,
         'max_range': 20.0,
         'calculate_depth': True,
@@ -82,15 +154,17 @@ def test_free(
         'segmentation_camera': False,
         'return_pointcloud': False
     }
+    
     env_manager.add_camera('front', config=camera_config, positions=q[:, :3], orientations=q[:, 3:])
+    env_manager.set_camera_pose_tensor('front', q[:, :3], q[:, 3:])
+    env_manager.capture_depth('front')
+
     
     # 准备保存深度图和渲染图像
     depth_images = []
     output_dir = f"outputs/test_free_depth_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
     os.makedirs(output_dir, exist_ok=True)
-    print(f"开始模拟")
-    
-    hidden_state = None
+    print(f"开始模拟，目标位置：{target_pos}")
     
     # 模拟并渲染每一步
     for step in range(sim_steps):
@@ -98,38 +172,28 @@ def test_free(
         att = q[:, 3:]  # 姿态
         angular_vel = qd[:, :3]  # 角速度
         vel = qd[:, 3:]  # 速度
-        print(torch.norm(vel, dim=1))
         
-        # 更新相机位置
+        # 计算到目标的方向和距离
+        dp = target_pos_tensor - pos
+        dist = torch.norm(dp, dim=1, keepdim=True)
+        dir = dp / dist
+
         env_manager.set_camera_pose_tensor('front', pos, att)
+        # 捕获深度图
         depth_img = env_manager.capture_depth('front')
         depth_img = depth_img.squeeze(0)
         
-        # 构建观察向量（匹配训练配置）
-        obs = torch.cat([
-            vel,  # 速度 (3)
-            angular_vel,  # 角速度 (3)
-            att,  # 姿态 (4)
-        ], dim=1).to(DEVICE)
-        
-        # 使用策略网络生成动作
-        with torch.no_grad():
-            a, hidden_state = policy(obs, depth_img, hidden_state)
-            a = action_transformation_function(a)
-            a = controller.accelerations_to_motor_thrusts(a[:, :3], a[:, 3:], att)
-        
-        # 模拟一步
-        q, qd = diff_step(q, qd, a, drone)
-        q, qd = diff_step(q, qd, a, drone)
-        q, qd = diff_step(q, qd, a, drone)
-        
-        # 保存深度图（每5步）
-        if step % 5 == 0:
+        # 保存深度图
+        if step % 2 == 0:  # 每5步保存一次以减少图像数量
             depth_img_np = depth_img.squeeze().cpu().numpy()
+            
+            # 应用颜色映射并保存
             plt.figure(figsize=(4, 4))
+            #rotate 180 degrees
             depth_img_np = cv2.rotate(depth_img_np, cv2.ROTATE_180)
             plt.imshow(depth_img_np, cmap='viridis')
             plt.colorbar(label='Depth')
+            # 在图像上添加位置和姿态信息
             pos_str = f"pos: [{pos[0,0]:.2f}, {pos[0,1]:.2f}, {pos[0,2]:.2f}]"
             att_str = f"att: [{att[0,0]:.2f}, {att[0,1]:.2f}, {att[0,2]:.2f}, {att[0,3]:.2f}]"
             plt.title(f"{pos_str}\n{att_str}", fontsize=8)
@@ -137,23 +201,49 @@ def test_free(
             depth_filename = os.path.join(output_dir, f'depth_{step:03d}.png')
             plt.savefig(depth_filename, bbox_inches='tight', pad_inches=0)
             plt.close()
+            
             depth_images.append(depth_filename)
+
+        nearest_vec, nearest_dist = env_manager.get_nearest_object_distance(pos)
+
+        # 构建观察向量
+        obs = torch.cat([
+            vel,  # 速度 (3)
+            angular_vel,  # 角速度 (3)
+            att,  # 姿态 (4)
+            dir,  # 方向 (3)
+            dist,  # 距离 (1)
+            pos,  # 位置 (3)
+            # nearest_vec,  # 最近物体向量 (3)
+            # nearest_dist,  # 最近物体距离 (1)
+        ], dim=1).to(DEVICE)
         
-        # 渲染当前状态
+        # 使用策略网络生成动作
+        a = policy(obs, depth_img)
+        a = action_transformation_function(a)
+        a = controller.accelerations_to_motor_thrusts(a[:, :3], a[:, 3:], att)
+        
+        # 模拟一步
+        q, qd = diff_step(q, qd, a, drone)
+        q, qd = diff_step(q, qd, a, drone)
+
+        # 获取所有障碍物的位置和半径信息
         obstacles = [{"position": torch.tensor(obj["position"]).cpu().numpy(),
                      "radius": obj["radius"],
                      "type": obj["type"]} for obj in env_manager.objects]
+        
+        # 渲染当前状态并保存图像
         drone.render(target_pos, obstacles)
         
-        # 打印状态（每30步）
+        # 每30步打印一次当前位置
         if step % 30 == 0:
             current_pos = pos.detach().cpu().numpy()[0]
-            dist = torch.norm(target_pos_tensor - pos, dim=1).item()
-            print(f"步骤 {step}: 位置 {current_pos}, 距离目标 {dist:.4f}")
+            current_dist = dist.detach().cpu().numpy()[0][0]
+            print(f"步骤 {step}: 位置 {current_pos}, 距离目标 {current_dist:.4f}")
     
-    # 打印最终结果
+    # 打印最终位置和速度
     final_pos = q[:, :3].detach().cpu().numpy()[0]
-    final_dist = torch.norm(target_pos_tensor - q[:, :3], dim=1).item()
+    final_dist = torch.norm(target_pos_tensor - q[:, :3], dim=1).detach().cpu().numpy()[0]
     
     print(f"\n=== 模拟完成 ===")
     print(f"最终位置: {final_pos}")
@@ -161,11 +251,12 @@ def test_free(
     print(f"最终姿态: {q.detach().cpu().numpy()[0]}")
     print(f"最终速度: {qd.detach().cpu().numpy()[0]}")
     
-    # 保存渲染结果和GIF
+    # 保存渲染结果
     drone.renderer.save()
+    
+    # 创建GIF
     if depth_images:
         create_gif(depth_images, os.path.join(output_dir, 'depth.gif'))
-    
     return final_pos, final_dist
 
 def create_gif(image_files, output_file, duration=0.1):
@@ -209,7 +300,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='测试训练好的无人机自由飞行策略')
     parser.add_argument('--path', type=str, required=True, help='策略网络权重的路径')
     parser.add_argument('--sim_steps', type=int, default=200, help='模拟步数')
-    parser.add_argument('--sim_dt', type=float, default=0.06, help='模拟时间步长')
+    parser.add_argument('--sim_dt', type=float, default=0.02, help='模拟时间步长')
     
     args = parser.parse_args()
     
@@ -217,7 +308,7 @@ if __name__ == "__main__":
         policy_path=args.path,
         sim_steps=args.sim_steps,
         sim_dt=args.sim_dt,
-        target_pos = [1.5, 0.7, 0]
+        target_pos = [0.3, 0.6, 0.8]
     )
     
     print(f"\n测试完成！最终位置: {final_pos}, 距离目标: {final_dist}")

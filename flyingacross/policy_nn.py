@@ -21,25 +21,23 @@ class CNNImageEncoder(nn.Module):
             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
             nn.ELU(),
 
-            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
-            nn.ELU(),
         )
         
-        self.linear_projection = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(image_res[0]//8 * image_res[1]//8 * 128, 256),
-            nn.ELU(),
-            nn.Linear(256, latent_dims),
-            nn.ELU(),
-        )
+        # self.linear_projection = nn.Sequential(
+        #     nn.Flatten(),
+        #     nn.Linear(image_res[0]//8 * image_res[1]//8 * 128, 256),
+        #     nn.ELU(),
+        #     nn.Linear(256, latent_dims),
+        #     nn.ELU(),
+        # )
 
         # Final projection to latent dims
-        # self.projection = nn.Sequential(
-        #     nn.AdaptiveAvgPool2d(1),  # [256, 1, 1]
-        #     # nn.AdaptiveMaxPool2d(1),
-        #     nn.Conv2d(256, latent_dims, kernel_size=1),  # [64, 1, 1]
-        #     nn.Flatten()  # [64]
-        # )
+        self.projection = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),  # [256, 1, 1]
+            # nn.AdaptiveMaxPool2d(1),
+            nn.Conv2d(128, latent_dims, kernel_size=1),  # [64, 1, 1]
+            nn.Flatten()  # [64]
+        )
 
     def forward(self, x):
         # Reshape input if needed
@@ -48,7 +46,7 @@ class CNNImageEncoder(nn.Module):
         
         # Forward pass
         features = self.features(x)
-        latent = self.linear_projection(features)
+        latent = self.projection(features)
         return latent
 
 class PolicyNetwork(nn.Module):

@@ -32,22 +32,30 @@ class SceneManager:
         self.objects = []  # List of objects in scene: [{"position": vec3, "radius": float}]
         self.target_pos = None
 
-    def create_box_mesh(self, size=1.0, flip_normals=False):
+    def create_box_mesh(self, size=1.0, flip_normals=False, size_x=None, size_y=None, size_z=None):
         """Create a box mesh with given size
         
         Args:
-            size: Size of the box
+            size: Size of the box (used for all dimensions if specific sizes not provided)
             flip_normals: Whether to flip face normals (reverse winding order)
+            size_x: Specific size for x-dimension
+            size_y: Specific size for y-dimension
+            size_z: Specific size for z-dimension
         """
+        # Use specific sizes if provided, otherwise use general size
+        sx = size_x if size_x is not None else size
+        sy = size_y if size_y is not None else size
+        sz = size_z if size_z is not None else size
+        
         vertices = np.array([
-            [-size, -size, -size],
-            [size, -size, -size],
-            [size, size, -size],
-            [-size, size, -size],
-            [-size, -size, size],
-            [size, -size, size],
-            [size, size, size],
-            [-size, size, size]
+            [-sx, -sy, -sz],
+            [sx, -sy, -sz],
+            [sx, sy, -sz],
+            [-sx, sy, -sz],
+            [-sx, -sy, sz],
+            [sx, -sy, sz],
+            [sx, sy, sz],
+            [-sx, sy, sz]
         ], dtype=np.float32)
 
         faces = np.array([
@@ -129,11 +137,12 @@ class SceneManager:
         self.target_pos = target_pos
 
     def wall_pos(self):
-        x = np.random.uniform(-0.1, 0.1)
+        x = np.random.uniform(-0.3, 0.3)
         y = np.random.uniform(-2, 2)
-        z = np.random.uniform(-0.2, 0.2) + 0.7
+        z = np.random.uniform(-0.2, 0.2) + 0.4
 
         pos = np.array([x, y, z])
+        return pos
 
     def random_pos(self):
         x = np.random.uniform(-self.room_size*0.3, self.room_size*0.3)
@@ -175,17 +184,17 @@ class SceneManager:
         # Add random objects
         for i in range(num_objects):
             if np.random.rand() > 0.5:
-                size = np.random.uniform(0.3, 0.6)
+                size = np.random.uniform(0.1, 0.2)
                 obj = self.create_box_mesh(size=size, flip_normals=True)
                 radius = size * 0.5  # Approximate box with sphere
                 obj_type = "box"
             else:
-                radius = np.random.uniform(0.3, 0.6)
+                radius = np.random.uniform(0.1, 0.2)
                 obj = self.create_sphere_mesh(radius=radius, flip_normals=True)
                 obj_type = "sphere"
 
-            pos = self.random_pos()
-
+            # pos = self.random_pos()
+            pos = self.wall_pos()
 
             obj_points = obj.points.numpy() + pos
             obj_indices = obj.indices.numpy() + vertex_count

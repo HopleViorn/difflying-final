@@ -143,8 +143,12 @@ class Drone:
             raise IndexError(f"Step {self.step} exceeds max steps {len(self.states)-1}")
         return self.states[self.step + 1]
     
-    def create_environment(self):
-        return
+    def create_environment(self, obstacles=None):
+        if obstacles is not None:
+            for i, obstacle in enumerate(obstacles):
+                pos = obstacle["position"]
+                radius = obstacle["radius"]
+                if obstacle["type"] == "box":
 
     def render(self, target_pos, obstacles=None):
         # print(f"Rendering at step {self.step}")

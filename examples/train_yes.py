@@ -13,8 +13,8 @@ import matplotlib.pyplot as plt
 from flyinglib.objects.propeller import *
 from flyinglib.objects.drone import *
 from flyinglib.simulation.step import *
+from flyinglib.modules.policy import *
 from flyinglib.scene.scene_manager import SceneManager
-
 
 DEVICE = "cuda:0"
 torch.set_default_tensor_type('torch.cuda.FloatTensor')
@@ -39,44 +39,90 @@ def action_transformation_function(action):
 
         return processed_action
 
-img_size = 64
+img_size = (64, 64)
+
+class CNNImageEncoder(nn.Module):
+    def __init__(self, image_res=(128, 128), latent_dims=64):
+        super(CNNImageEncoder, self).__init__()
+        self.image_res = image_res
+        self.latent_dims = latent_dims
+        
+        # Feature extraction with stride convolutions
+        self.features = nn.Sequential(
+            # Block 1: [1, 135, 240] -> [32, 68, 120]
+            nn.Conv2d(1, 32, kernel_size=5, stride=2, padding=2),
+            nn.ELU(),
+            
+            # Block 2: [32, 68, 120] -> [64, 34, 60]
+            nn.Conv2d(32, 64, kernel_size=5, stride=2, padding=2),
+            nn.ELU(),
+            
+            # Block 3: [64, 34, 60] -> [128, 17, 30]
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.ELU(),
+            
+            # Block 4: [128, 17, 30] -> [256, 9, 15]
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+            nn.ELU()
+        )
+        
+        # Final projection to latent dims
+        self.projection = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),  # [256, 1, 1]
+            # nn.AdaptiveMaxPool2d(1),
+            nn.Conv2d(256, latent_dims, kernel_size=1),  # [64, 1, 1]
+            nn.Flatten()  # [64]
+        )
+
+        # 添加sigmoid层
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # Reshape input if needed
+        if len(x.shape) == 3:  # [batch, H, W]
+            x = x.unsqueeze(1)  # [batch, 1, H, W]
+        
+        # Forward pass
+        features = self.features(x)
+        latent = self.projection(features)
+        return latent
 
 class PolicyNetwork(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(PolicyNetwork, self).__init__()
+        
+        self.image_encoder = CNNImageEncoder(image_res=img_size, latent_dims=64)
+        
+        # Original network with expanded input dimension (21 + 64 = 85)
         self.network = nn.Sequential(
-            nn.Linear(input_dim, 512),
-            nn.BatchNorm1d(512),
+            nn.Linear(input_dim + 64, 512),
             nn.ELU(),
-            nn.Dropout(p=0.2),
             nn.Linear(512, 256),
-            nn.BatchNorm1d(256),
             nn.ELU(),
-            nn.Dropout(p=0.2),
             nn.Linear(256, 256),
-            nn.BatchNorm1d(256),
             nn.ELU(),
-            nn.Dropout(p=0.2),
             nn.Linear(256, 128),
-            nn.BatchNorm1d(128),
             nn.ELU(),
-            nn.Dropout(p=0.2),
             nn.Linear(128, 64),
-            nn.BatchNorm1d(64),
             nn.ELU(),
-            nn.Dropout(p=0.2),
             nn.Linear(64, output_dim)
         )
     
-    def forward(self, x):
+    def forward(self, x, depth_imgs=None):
+        if depth_imgs is not None:
+            # Encode depth images using VAE
+            depth_latent = self.image_encoder(depth_imgs)
+            x = torch.cat([x, depth_latent], dim=1)
+        else:
+            x = torch.cat([x, torch.zeros(x.shape[0], 64, device=x.device)], dim=1)
         return self.network(x)
 
 def train_free_flight(
-    epochs: int = 1000,
-    batch_size: int = 1024,
-    sim_steps: int = 150,
+    epochs: int = 100,
+    batch_size: int = 128,
+    sim_steps: int = 200,
     sim_dt: float = 0.02,
-    initial_lr: float = 1e-2,
+    initial_lr: float = 1e-3,
 ):  
     date = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     log_path = "logs/test/" + date + "/"
@@ -87,8 +133,8 @@ def train_free_flight(
     # 添加前置摄像头
   
     camera_config = {
-        'width': 64,
-        'height': 64,
+        'width': img_size[0],
+        'height': img_size[1],
         'horizontal_fov_deg': 120,
         'max_range': 20.0,
         'calculate_depth': True,
@@ -98,9 +144,18 @@ def train_free_flight(
     }
     drone = Drone('test', batch_size=batch_size, sim_steps=sim_steps, sim_dt=sim_dt)
 
-    policy = PolicyNetwork(input_dim=21, output_dim=6)
+    policy = PolicyNetwork(input_dim=14, output_dim=6)
+
+    load_policy = "logs/test/20250412-004329/policy_final.pth"
+    # load_policy = None
+
+    if load_policy:
+        policy.load_state_dict(torch.load(load_policy))
+        print(f"加载策略：{load_policy}")
+
+
     optimizer = optim.AdamW(policy.parameters(), lr=initial_lr, weight_decay=0.0001)
-    
+
     # 添加学习率调度器，在验证损失停止改善时降低学习率
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=50,    
                                  verbose=True, min_lr=1e-4)
@@ -123,20 +178,22 @@ def train_free_flight(
         qd = torch.tensor(init_qd, requires_grad=True)        
 
         env_manager = SceneManager(batch_size=batch_size)
-        env_manager.setup_room(room_size=5.0, num_objects=32)
-        env_manager.save_scene(log_path + "scene.json")
+        env_manager.setup_room(room_size=5.0, num_objects=0)
         env_manager.add_camera('front', config=camera_config, positions=q[:, :3], orientations=q[:, 3:])
         env_manager.set_camera_pose_tensor('front', q[:, :3], q[:, 3:])
         env_manager.capture_depth('front')
 
-
         # random_directions = torch.randn((batch_size, 3), device=DEVICE)
         # random_directions = random_directions / torch.norm(random_directions, dim=1, keepdim=True)  # 单位向量
-        # random_distances = torch.rand((batch_size, 1), device=DEVICE) * 1.0 + 1.0  # 2到3米之间的随机距离
+        # random_distances = torch.rand((batch_size, 1), device=DEVICE) * 1.2
         # target_pos = random_directions * random_distances  # 最终目标位置
 
-        target_pos = torch.tensor([[0.8, 0.8, 0.8]], device=DEVICE)
+        x = torch.rand((batch_size, 1), device=DEVICE) * 0.2 + 0.3
+        y = torch.rand((batch_size, 1), device=DEVICE) * 0.5 + 0.5
+        z = torch.rand((batch_size, 1), device=DEVICE) * 0.5 + 0.5
 
+        target_pos = torch.cat([x, y, z], dim=1)
+        # print(f"target_pos: {target_pos}")
 
         # a = torch.zeros(drone.props.shape, requires_grad=True)
         
@@ -152,6 +209,9 @@ def train_free_flight(
         dp = target_pos - pos
         dist = torch.norm(dp, dim=1, keepdim=True)
         dir = dp / dist
+
+
+        loss_path = []
 
         for _ in range(sim_steps):
             # 更新所有环境的摄像机位置和朝向
@@ -170,8 +230,8 @@ def train_free_flight(
                 att
             )
 
-            # depth_imgs = env_manager.capture_depth('front')
-            # depth_imgs = depth_imgs.squeeze(0)
+            depth_imgs = env_manager.capture_depth('front')
+            depth_imgs = depth_imgs.squeeze(0)
             #save
             # plt.imshow(depth_imgs[0].cpu().numpy())
             # plt.savefig(f"depth_imgs_{0}.png")
@@ -182,17 +242,17 @@ def train_free_flight(
             nearest_vec, nearest_dist = env_manager.get_nearest_object_distance(pos)
 
             obs = torch.cat([
-                pos, # 3
                 vel, # 3
                 angular_vel, # 3
                 att, # 4
                 dir, # 3
                 dist, # 1
-                nearest_vec, # 3
-                nearest_dist, # 1
+                pos, # 3
+                # nearest_vec, # 3
+                # nearest_dist, # 1
             ], dim=1).to(DEVICE)
 
-            a = policy(obs)
+            a = policy(obs, depth_imgs)
             a = action_transformation_function(a)
             a = controller.accelerations_to_motor_thrusts(a[:, :3], a[:, 3:], att)
             
@@ -205,20 +265,26 @@ def train_free_flight(
 
             dp = target_pos - pos
             dist = torch.norm(dp, dim=1, keepdim=True)
-            dir = dp / dist
 
             # Compute loss
             loss_att += 1 - torch.mean(att[:, -1])
             loss_vel += torch.mean(vel**2)
-            loss_vel_down += torch.mean(torch.relu(-vel - 1.4) ** 2)
-            loss_extreme_angle += torch.mean(torch.relu(-att[:, 3] + 0.95))
+            loss_vel_down += torch.mean(torch.relu(-vel - 1.0) ** 2)
+            loss_extreme_angle += torch.mean(torch.relu(-att[:, 3] + 0.94))
             # loss_nearest_dist += torch.mean(torch.relu(nearest_dist - 0.1) ** 2)
-            loss_nearest_dist += torch.mean(torch.relu(-nearest_dist + 0.3) ** 2)
+            loss_nearest_dist += torch.mean(torch.relu(-nearest_dist + 0.4) ** 2) * 0
 
             # loss_pos += torch.mean(1 - torch.exp(-0.05*dist))
             loss_pos += torch.mean(dist)
+            if _ == 100:
+                loss_path.append(torch.mean(torch.norm(torch.tensor([0.4, target_pos[1]/2, target_pos[2]/4])-pos, dim=1, keepdim=True)))
+
+        if epoch % 100 == 0:
+            policy_path = log_path + f"policy_{epoch}_{dist.mean().item():.4f}.pth"
+            torch.save(policy.state_dict(), policy_path)
         # Compute loss
-        loss = 0.1 * loss_pos + 10 * loss_nearest_dist + 0.01 * loss_att +  loss_vel*0.001 + 5 * torch.mean(dist) + loss_vel_down * 20 + loss_extreme_angle * 20
+
+        loss = 30 * loss_path[0] + 30 * torch.mean(dist)  + 50 * loss_nearest_dist + 0.0000 * loss_att +  loss_vel * 0.00005 + loss_vel_down * 20 + loss_extreme_angle * 20
 
         # Backward pass and optimization
         optimizer.zero_grad()
@@ -252,7 +318,7 @@ def train_free_flight(
 
     writer.close()
 
-    policy_path = log_path + "policy.pth"
+    policy_path = log_path + "policy_final.pth"
     torch.save(policy.state_dict(), policy_path)
 
     return policy_path
@@ -260,7 +326,7 @@ def train_free_flight(
 
 def test_free(
     policy_path: str,
-    sim_steps: int = 150,
+    sim_steps: int = 200,
     sim_dt: float = 0.02,
 ):
     """
@@ -271,9 +337,19 @@ def test_free(
         sim_steps: 模拟步数
         sim_dt: 模拟时间步长
     """
+
+    camera_config = {
+        'width': img_size[0],
+        'height': img_size[1],
+        'horizontal_fov_deg': 120,
+        'max_range': 20.0,
+        'calculate_depth': True,
+        'num_sensors': 1,
+        'segmentation_camera': False,
+        'return_pointcloud': False
+    }
+
     # 初始化环境管理器并设置场景
-    env_manager = SceneManager(batch_size=1)
-    env_manager.setup_room(room_size=5.0, num_objects=4)
     
     # 创建单个无人机实例，不需要梯度计算
     drone = Drone('test', batch_size=1, sim_steps=sim_steps, sim_dt=sim_dt, requires_grad=False)
@@ -283,11 +359,17 @@ def test_free(
     qd = torch.zeros((1, 6)).to(DEVICE)
     
     # 设置目标位置
-    target_pos = [0.7, 0.7, 0.7]
+    target_pos = [0.2, 0.7, 0.8]
     target_pos_tensor = torch.tensor([target_pos]).to(DEVICE)
+
+    env_manager = SceneManager(batch_size=1)
+    env_manager.setup_room(room_size=5.0, num_objects=0)
+    env_manager.add_camera('front', config=camera_config, positions=q[:, :3], orientations=q[:, 3:])
+    env_manager.set_camera_pose_tensor('front', q[:, :3], q[:, 3:])
+    env_manager.capture_depth('front')
     
     # 加载策略网络
-    policy = PolicyNetwork(input_dim=21, output_dim=6)
+    policy = PolicyNetwork(input_dim=14, output_dim=6)
     policy.load_state_dict(torch.load(policy_path))
     policy.eval()
     
@@ -305,27 +387,28 @@ def test_free(
         dp = target_pos_tensor - pos
         dist = torch.norm(dp, dim=1, keepdim=True)
         dir = dp / dist
-        
+
+        depth_imgs = env_manager.capture_depth('front')
+        depth_imgs = depth_imgs.squeeze(0)
         # 获取最近物体距离
         nearest_vec, nearest_dist = env_manager.get_nearest_object_distance(pos)
         
         # 构建观察向量
         obs = torch.cat([
-            pos,  # 位置 (3)
             vel,  # 速度 (3)
             angular_vel,  # 角速度 (3)
             att,  # 姿态 (4)
             dir,  # 方向 (3)
             dist,  # 距离 (1)
-            nearest_vec,  # 最近物体方向 (3)
-            nearest_dist,  # 最近物体距离 (1)
+            # pos,  # 位置 (3)
+            # nearest_vec,  # 最近物体方向 (3)
+            # nearest_dist,  # 最近物体距离 (1)
         ], dim=1).to(DEVICE)
         
         # 使用策略网络生成动作
-        with torch.no_grad():
-            a = policy(obs)
-            a = action_transformation_function(a)
-            a = controller.accelerations_to_motor_thrusts(a[:, :3], a[:, 3:], att)
+        a = policy(obs, depth_imgs)
+        a = action_transformation_function(a)
+        a = controller.accelerations_to_motor_thrusts(a[:, :3], a[:, 3:], att)
         
         # 模拟一步
         q, qd = diff_step(q, qd, a, drone)

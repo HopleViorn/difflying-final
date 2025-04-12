@@ -56,7 +56,7 @@ def train_free_flight(
         'segmentation_camera': False,
         'return_pointcloud': False
     }
-    drone = Drone('test', batch_size=batch_size, sim_steps=sim_steps, sim_dt=sim_dt)
+    drone = Drone('test', batch_size=batch_size, sim_steps=sim_steps*3, sim_dt=sim_dt)
 
     policy = GRUPolicyNetwork(input_dim=10, output_dim=6, hidden_size=128)
 
@@ -135,14 +135,19 @@ def train_free_flight(
             a = controller.accelerations_to_motor_thrusts(a[:, :3], a[:, 3:], att)
             
             q, qd = diff_step(q, qd, a, drone)
+            q, qd = diff_step(q, qd, a, drone)
+            q, qd = diff_step(q, qd, a, drone)
 
             pos = q[:, :3] # positions
             att = q[:, 3:] # attitudes
             vel = qd[:, 3:] # velovoties
             rat = qd[:, :3] # rates
 
+            position = q[:, :3]
+
             # Compute loss
             target_velocity = torch.tensor([0, 0, 0.5], device=DEVICE)
+
             loss_att += 1 - torch.mean(att[:, -1])
             loss_vel += torch.mean(torch.relu(torch.norm(vel - target_velocity, dim=1) - 0.1))
             loss_vel_extreme += torch.mean(torch.relu(-vel - 1.0))
